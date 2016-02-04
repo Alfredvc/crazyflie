@@ -40,6 +40,23 @@
 #include "adc.h"
 #include "ledseq.h"
 #include "commander.h"
+#include "sound.h"
+
+typedef struct _PmSyslinkInfo
+{
+  union
+  {
+    uint8_t flags;
+    struct
+    {
+      uint8_t pgood  : 1;
+      uint8_t chg    : 1;
+      uint8_t unused : 6;
+    };
+  };
+  float vBat;
+  float chargeCurrent;
+}  __attribute__((packed)) PmSyslinkInfo;
 
 static float    batteryVoltage;
 static float    batteryVoltageMin = 6.0;
@@ -82,7 +99,7 @@ void pmInit(void)
   if(isInit)
     return;
   
-  xTaskCreate(pmTask, (const signed char * const)PM_TASK_NAME,
+  xTaskCreate(pmTask, PM_TASK_NAME,
               PM_TASK_STACKSIZE, NULL, PM_TASK_PRI, NULL);
   
   isInit = true;
@@ -140,7 +157,7 @@ static void pmSetBatteryVoltage(float voltage)
 static void pmSystemShutdown(void)
 {
 #ifdef ACTIVATE_AUTO_SHUTDOWN
-  GPIO_SetBits(PM_GPIO_SYSOFF_PORT, PM_GPIO_SYSOFF);
+//TODO: Implement syslink call to shutdown
 #endif
 }
 
@@ -270,21 +287,25 @@ void pmTask(void *param)
         case charged:
           ledseqStop(CHG_LED, seq_charging);
           ledseqRun(CHG_LED, seq_charged);
+          soundSetEffect(SND_BAT_FULL);
           systemSetCanFly(false);
           break;
         case charging:
           ledseqStop(LOWBAT_LED, seq_lowbat);
           ledseqStop(CHG_LED, seq_charged);
           ledseqRun(CHG_LED, seq_charging);
+          soundSetEffect(SND_USB_CONN);
           systemSetCanFly(false);
           break;
         case lowPower:
           ledseqRun(LOWBAT_LED, seq_lowbat);
+          soundSetEffect(SND_BAT_LOW);
           systemSetCanFly(true);
           break;
         case battery:
           ledseqStop(CHG_LED, seq_charging);
           ledseqRun(CHG_LED, seq_charged);
+          soundSetEffect(SND_USB_DISC);
           systemSetCanFly(true);
           break;
         default:
@@ -303,8 +324,8 @@ void pmTask(void *param)
           uint32_t onTime;
 
           onTime = pmBatteryChargeFromVoltage(pmGetBatteryVoltage()) *
-                   (LEDSEQ_CHARGE_CYCLE_TIME / 10);
-          ledseqSetTimes(seq_charging, onTime, LEDSEQ_CHARGE_CYCLE_TIME - onTime);
+                   (LEDSEQ_CHARGE_CYCLE_TIME_500MA / 10);
+          ledseqSetTimes(seq_charging, onTime, LEDSEQ_CHARGE_CYCLE_TIME_500MA - onTime);
         }
         break;
       case lowPower:

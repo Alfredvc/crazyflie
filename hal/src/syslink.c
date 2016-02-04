@@ -26,7 +26,6 @@
 #define DEBUG_MODULE "SL"
 
 #include <stdbool.h>
-#include <errno.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -173,7 +172,7 @@ void syslinkInit()
 
   vSemaphoreCreateBinary(syslinkAccess);
 
-  if (xTaskCreate(syslinkTask, (const signed char * const)SYSLINK_TASK_NAME,
+  if (xTaskCreate(syslinkTask, SYSLINK_TASK_NAME,
                   SYSLINK_TASK_STACKSIZE, NULL, SYSLINK_TASK_PRI, NULL) == pdPASS)
   {
     isInit = true;

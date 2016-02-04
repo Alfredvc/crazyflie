@@ -1,6 +1,6 @@
 /**
- *    ||          ____  _ __                           
- * +------+      / __ )(_) /_______________ _____  ___ 
+ *    ||          ____  _ __
+ * +------+      / __ )(_) /_______________ _____  ___
  * | 0xBC |     / __  / / __/ ___/ ___/ __ `/_  / / _ \
  * +------+    / /_/ / / /_/ /__/ /  / /_/ / / /_/  __/
  *  ||  ||    /_____/_/\__/\___/_/   \__,_/ /___/\___/
@@ -28,25 +28,34 @@
 
 /* FreeRtos includes */
 #include "FreeRTOS.h"
-#include "task.h"
 #include <stdint.h>
+#include <string.h>
 
+#include "config.h"
 #include "crtp.h"
 #include "platformservice.h"
 #include "syslink.h"
+#include "version.h"
 
 static bool isInit=false;
 
 typedef enum {
   platformCommand   = 0x00,
+  versionCommand    = 0x01,
 } Channel;
 
 typedef enum {
   setContinousWave   = 0x00,
 } PlatformCommand;
 
+typedef enum {
+  getProtocolVersion = 0x00,
+  getFirmwareVersion = 0x01,
+} VersionCommand;
+
 void platformserviceHandler(CRTPPacket *p);
 static void platformCommandProcess(uint8_t command, uint8_t *data);
+static void versionCommandProcess(CRTPPacket *p);
 
 void platformserviceInit(void)
 {
@@ -55,7 +64,7 @@ void platformserviceInit(void)
 
   // Register a callback to service the Platform port
   crtpRegisterPortCB(CRTP_PORT_PLATFORM, platformserviceHandler);
-  
+
   isInit = true;
 }
 
@@ -72,9 +81,11 @@ void platformserviceHandler(CRTPPacket *p)
       platformCommandProcess(p->data[0], &p->data[1]);
       crtpSendPacket(p);
       break;
+    case versionCommand:
+      versionCommandProcess(p);
     default:
       break;
-  } 
+  }
 }
 
 static void platformCommandProcess(uint8_t command, uint8_t *data)
@@ -91,5 +102,22 @@ static void platformCommandProcess(uint8_t command, uint8_t *data)
     default:
       break;
   }
+}
 
+static void versionCommandProcess(CRTPPacket *p)
+{
+  switch (p->data[0]) {
+    case getProtocolVersion:
+      *(int*)&p->data[1] = PROTOCOL_VERSION;
+      p->size = 5;
+      crtpSendPacket(p);
+      break;
+    case getFirmwareVersion:
+      strncpy((char*)&p->data[1], V_STAG, CRTP_MAX_DATA_SIZE-1);
+      p->size = (strlen(V_STAG)>CRTP_MAX_DATA_SIZE-1)?CRTP_MAX_DATA_SIZE:strlen(V_STAG)+1;
+      crtpSendPacket(p);
+      break;
+    default:
+      break;
+  }
 }

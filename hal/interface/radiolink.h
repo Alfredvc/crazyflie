@@ -31,8 +31,8 @@
 #include <stdbool.h>
 #include "syslink.h"
 
-void radioInit(void);
-bool radioTest(void);
+void radiolinkInit(void);
+bool radiolinkTest(void);
 void radiolinkSetChannel(uint8_t channel);
 void radiolinkSetDatarate(uint8_t datarate);
 void radiolinkSetAddress(uint64_t address);

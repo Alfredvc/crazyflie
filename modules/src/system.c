@@ -1,6 +1,6 @@
 /*
- *    ||          ____  _ __                           
- * +------+      / __ )(_) /_______________ _____  ___ 
+ *    ||          ____  _ __
+ * +------+      / __ )(_) /_______________ _____  ___
  * | 0xBC |     / __  / / __/ ___/ ___/ __ `/_  / / _ \
  * +------+    / /_/ / / /_/ /__/ /  / /_/ / / /_/  __/
  *  ||  ||    /_____/_/\__/\___/_/   \__,_/ /___/\___/
@@ -51,11 +51,18 @@
 #include "comm.h"
 #include "stabilizer.h"
 #include "commander.h"
-#include "neopixelring.h"
 #include "console.h"
-#include "usb.h"
-#include "expbrd.h"
+#include "usblink.h"
 #include "mem.h"
+#include "proximity.h"
+#include "watchdog.h"
+#include "queuemonitor.h"
+#include "buzzer.h"
+#include "sound.h"
+
+#ifdef PLATFORM_CF2
+#include "deck.h"
+#endif
 
 /* Private variable */
 static bool selftestPassed;
@@ -71,13 +78,13 @@ static void systemTask(void *arg);
 /* Public functions */
 void systemLaunch(void)
 {
-  xTaskCreate(systemTask, (const signed char * const)SYSTEM_TASK_NAME,
+  xTaskCreate(systemTask, SYSTEM_TASK_NAME,
               SYSTEM_TASK_STACKSIZE, NULL,
               SYSTEM_TASK_PRI, NULL);
 
 }
 
-//This must be the first module to be initialized!
+// This must be the first module to be initialized!
 void systemInit(void)
 {
   if(isInit)
@@ -86,24 +93,43 @@ void systemInit(void)
   canStartMutex = xSemaphoreCreateMutex();
   xSemaphoreTake(canStartMutex, portMAX_DELAY);
 
+#ifdef PLATFORM_CF2
+  usblinkInit();
+#endif
+
+  /* Initialized hear and early so that DEBUG_PRINT (buffered) can be used early */
+  crtpInit();
+  consoleInit();
+
+  DEBUG_PRINT("----------------------------\n");
+  DEBUG_PRINT(P_NAME " is up and running!\n");
+  DEBUG_PRINT("Build %s:%s (%s) %s\n", V_SLOCAL_REVISION,
+              V_SREVISION, V_STAG, (V_MODIFIED)?"MODIFIED":"CLEAN");
+  DEBUG_PRINT("I am 0x%X%X%X and I have %dKB of flash!\n",
+              *((int*)(MCU_ID_ADDRESS+8)), *((int*)(MCU_ID_ADDRESS+4)),
+              *((int*)(MCU_ID_ADDRESS+0)), *((short*)(MCU_FLASH_SIZE_ADDRESS)));
+
   configblockInit();
   workerInit();
-  //adcInit();
+  adcInit();
   ledseqInit();
   pmInit();
-    
+  buzzerInit();
+
   isInit = true;
 }
 
 bool systemTest()
 {
   bool pass=isInit;
-  
-  //pass &= adcTest();
+
+#ifdef PLATFORM_CF1
+  pass &= adcTest();
+#endif
   pass &= ledseqTest();
   pass &= pmTest();
   pass &= workerTest();
-  
+  pass &= buzzerTest();
   return pass;
 }
 
@@ -112,9 +138,13 @@ bool systemTest()
 void systemTask(void *arg)
 {
   bool pass = true;
-  
+
   ledInit();
   ledSet(CHG_LED, 1);
+
+#ifdef DEBUG_QUEUE_MONITOR
+  queueMonitorInit();
+#endif
 
   uartInit();
 #ifdef ENABLE_UART1
@@ -137,34 +167,37 @@ void systemTask(void *arg)
 #endif //ndef USE_RADIOLINK_CRTP
 
   commInit();
-
-  DEBUG_PRINT("----------------------------\n");
-  DEBUG_PRINT("Crazyflie is up and running!\n");
-  DEBUG_PRINT("Build %s:%s (%s) %s\n", V_SLOCAL_REVISION,
-              V_SREVISION, V_STAG, (V_MODIFIED)?"MODIFIED":"CLEAN");
-  DEBUG_PRINT("I am 0x%X%X%X and I have %dKB of flash!\n",
-              *((int*)(MCU_ID_ADDRESS+8)), *((int*)(MCU_ID_ADDRESS+4)),
-              *((int*)(MCU_ID_ADDRESS+0)), *((short*)(MCU_FLASH_SIZE_ADDRESS)));
-
   commanderInit();
   stabilizerInit();
-  expbrdInit();
+#ifdef PLATFORM_CF2
+  deckInit();
+  #endif
+  soundInit();
   memInit();
-  
+
+#ifdef PROXIMITY_ENABLED
+  proximityInit();
+#endif
+
   //Test the modules
   pass &= systemTest();
   pass &= configblockTest();
   pass &= commTest();
   pass &= commanderTest();
   pass &= stabilizerTest();
-  pass &= expbrdTest();
+#ifdef PLATFORM_CF2
+  pass &= deckTest();
+  #endif
+  pass &= soundTest();
   pass &= memTest();
-  
+  pass &= watchdogNormalStartTest();
+
   //Start the firmware
   if(pass)
   {
     selftestPassed = 1;
     systemStart();
+    soundSetEffect(SND_STARTUP);
     ledseqRun(SYS_LED, seq_alive);
     ledseqRun(LINK_LED, seq_testPassed);
   }
@@ -193,9 +226,9 @@ void systemTask(void *arg)
     }
   }
   DEBUG_PRINT("Free heap: %d bytes\n", xPortGetFreeHeapSize());
-  
+
   workerLoop();
-  
+
   //Should never reach this point!
   while(1)
     vTaskDelay(portMAX_DELAY);
@@ -206,6 +239,9 @@ void systemTask(void *arg)
 void systemStart()
 {
   xSemaphoreGive(canStartMutex);
+#ifndef DEBUG
+  watchdogInit();
+#endif
 }
 
 void systemWaitStart(void)
@@ -231,16 +267,21 @@ bool systemCanFly(void)
 
 void vApplicationIdleHook( void )
 {
-  extern size_t debugPrintTCBInfo(void);
-  static uint32_t timeToPrint = M2T(5000);
+  static uint32_t tickOfLatestWatchdogReset = M2T(0);
 
-  if (xTaskGetTickCount() - timeToPrint > M2T(10000))
+  portTickType tickCount = xTaskGetTickCount();
+
+  if (tickCount - tickOfLatestWatchdogReset > M2T(WATCHDOG_RESET_PERIOD_MS))
   {
-    timeToPrint = xTaskGetTickCount();
-    debugPrintTCBInfo();
+    tickOfLatestWatchdogReset = tickCount;
+    watchdogReset();
   }
-  // Enter sleep mode
-//  { __asm volatile ("wfi"); }
+
+  // Enter sleep mode. Does not work when debugging chip with SWD.
+  // Currently saves about 20mA STM32F405 current consumption (~30%).
+#ifndef DEBUG
+  { __asm volatile ("wfi"); }
+#endif
 }
 
 /*System parameters (mostly for test, should be removed from here) */

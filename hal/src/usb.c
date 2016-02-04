@@ -33,6 +33,7 @@
 #include "task.h"
 #include "semphr.h"
 #include "queue.h"
+#include "queuemonitor.h"
 
 #include "config.h"
 #include "usblink.h"
@@ -43,7 +44,6 @@
 #include "usb_conf.h"
 #include "usbd_desc.h"
 #include "usb_dcd.h"
-#include "ledseq.h"
 
 #include "crtp.h"
 
@@ -126,6 +126,17 @@ USBD_Class_cb_TypeDef cf_usb_cb =
   NULL,
   NULL,
   usbd_cf_GetCfgDesc,
+};
+
+USBD_Usr_cb_TypeDef USR_cb =
+{
+  USBD_USR_Init,
+  USBD_USR_DeviceReset,
+  USBD_USR_DeviceConfigured,
+  USBD_USR_DeviceSuspended,
+  USBD_USR_DeviceResumed,
+  USBD_USR_DeviceConnected,
+  USBD_USR_DeviceDisconnected,
 };
 
 int command = 0xFF;
@@ -260,6 +271,77 @@ static uint8_t  *usbd_cf_GetCfgDesc (uint8_t speed, uint16_t *length)
   return usbd_cf_CfgDesc;
 }
 
+/**
+* @brief  USBD_USR_Init
+*         Displays the message on LCD for host lib initialization
+* @param  None
+* @retval None
+*/
+void USBD_USR_Init(void)
+{
+}
+
+/**
+* @brief  USBD_USR_DeviceReset
+* @param  speed : device speed
+* @retval None
+*/
+void USBD_USR_DeviceReset(uint8_t speed)
+{
+}
+
+
+/**
+* @brief  USBD_USR_DeviceConfigured
+* @param  None
+* @retval Staus
+*/
+void USBD_USR_DeviceConfigured(void)
+{
+}
+
+/**
+* @brief  USBD_USR_DeviceSuspended
+* @param  None
+* @retval None
+*/
+void USBD_USR_DeviceSuspended(void)
+{
+  /* USB communication suspended (probably USB unplugged). Switch back to radiolink */
+  crtpSetLink(radiolinkGetLink());
+}
+
+
+/**
+* @brief  USBD_USR_DeviceResumed
+* @param  None
+* @retval None
+*/
+void USBD_USR_DeviceResumed(void)
+{
+}
+
+
+/**
+* @brief  USBD_USR_DeviceConnected
+* @param  None
+* @retval Staus
+*/
+void USBD_USR_DeviceConnected(void)
+{
+}
+
+
+/**
+* @brief  USBD_USR_DeviceDisonnected
+* @param  None
+* @retval Staus
+*/
+void USBD_USR_DeviceDisconnected(void)
+{
+  crtpSetLink(radiolinkGetLink());
+}
+
 void usbInit(void)
 {
   USBD_Init(&USB_OTG_dev,
@@ -270,7 +352,9 @@ void usbInit(void)
 
   // This should probably be reduced to a CRTP packet size
   usbDataRx = xQueueCreate(5, sizeof(USBPacket)); /* Buffer USB packets (max 64 bytes) */
+  DEBUG_QUEUE_MONITOR_REGISTER(usbDataRx);
   usbDataTx = xQueueCreate(1, sizeof(USBPacket)); /* Buffer USB packets (max 64 bytes) */
+  DEBUG_QUEUE_MONITOR_REGISTER(usbDataTx);
 
   isInit = true;
 }

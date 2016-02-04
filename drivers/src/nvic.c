@@ -25,11 +25,15 @@
  */
 #include "exti.h"
 #include "led.h"
-#include "uart_syslink.h"
 //#include "i2croutines.h"
 #include "i2cdev.h"
 #include "ws2812.h"
-#include "usb_core.h"
+
+#ifdef PLATFORM_CF1
+#include "uart.h"
+#else
+#include "uart_syslink.h"
+#endif
 
 #define DONT_DISCARD __attribute__((used))
 
@@ -47,10 +51,13 @@ extern void tickI2C(void);
 void DONT_DISCARD SysTick_Handler(void)
 {
     tickFreeRTOS();
+#ifdef PLATFORM_CF2
     tickI2C();
+#endif
 }
 
 #ifdef NVIC_NOT_USED_BY_FREERTOS
+
 /**
   * @brief  This function handles SVCall exception.
   */
@@ -172,60 +179,7 @@ void DONT_DISCARD DebugMon_Handler(void)
 {
 }
 
-void DONT_DISCARD DMA1_Channel1_IRQHandler(void)
-{
-//  adcInterruptHandler();
-}
-
-void DONT_DISCARD TIM2_IRQHandler(void)
-{
-//  ADC_StartConversion(ADC1);
-//  ADC_StartConversion(ADC2);
-//  TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
-
-}
-
 void DONT_DISCARD DMA1_Stream5_IRQHandler(void)
 {
   ws2812DmaIsr();
 }
-
-void DONT_DISCARD DMA2_Stream7_IRQHandler(void)
-{
-  uartDmaIsr();
-}
-
-
-void DONT_DISCARD EXTI15_10_IRQHandler(void)
-{
-  extiInterruptHandler();
-}
-
-void DONT_DISCARD EXTI4_IRQHandler(void)
-{
-  uartTxenFlowctrlIsr();
-}
-
-void DONT_DISCARD USART2_IRQHandler(void)
-{
-  uartIsr();
-}
-
-void DONT_DISCARD UART4_IRQHandler(void)
-{
-  uartIsr();
-}
-
-void DONT_DISCARD USART6_IRQHandler(void)
-{
-  uartIsr();
-}
-
-extern USB_OTG_CORE_HANDLE           USB_OTG_dev;
-extern uint32_t USBD_OTG_ISR_Handler (USB_OTG_CORE_HANDLE *pdev);
-
-void OTG_FS_IRQHandler(void)
-{
-  USBD_OTG_ISR_Handler (&USB_OTG_dev);
-}
-

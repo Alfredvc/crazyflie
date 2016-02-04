@@ -45,6 +45,7 @@
 #include "ledseq.h"
 #include "param.h"
 #include "log.h"
+#include "sound.h"
 
 #define IMU_ENABLE_PRESSURE_LPS25H
 #define IMU_ENABLE_MAG_AK8963
@@ -54,12 +55,12 @@
 #define IMU_DEG_PER_LSB_CFG   MPU6500_DEG_PER_LSB_2000
 #define IMU_ACCEL_FS_CFG      MPU6500_ACCEL_FS_8
 #define IMU_G_PER_LSB_CFG     MPU6500_G_PER_LSB_8
-#define IMU_1G_RAW            (int16_t)(1.0 / MPU6500_G_PER_LSB_8)
+#define IMU_1G_RAW            (int16_t)(1.0f / MPU6500_G_PER_LSB_8)
 
 #define IMU_VARIANCE_MAN_TEST_TIMEOUT M2T(1000) // Timeout in ms
-#define IMU_MAN_TEST_LEVEL_MAX        5.0      // Max degrees off
+#define IMU_MAN_TEST_LEVEL_MAX        5.0f      // Max degrees off
 
-#define MAG_GAUSS_PER_LSB     666.7
+#define MAG_GAUSS_PER_LSB     666.7f
 
 #define IMU_STARTUP_TIME_MS   1000
 
@@ -70,8 +71,10 @@
 #define GYRO_NBR_OF_AXES            3
 #define GYRO_MIN_BIAS_TIMEOUT_MS    M2T(1*1000)
 
+// Number of samples used in variance calculation. Changing this effects the threshold
 #define IMU_NBR_OF_BIAS_SAMPLES  128
 
+// Variance threshold to take zero bias for gyro
 #define GYRO_VARIANCE_BASE        2000
 #define GYRO_VARIANCE_THRESHOLD_X (GYRO_VARIANCE_BASE)
 #define GYRO_VARIANCE_THRESHOLD_Y (GYRO_VARIANCE_BASE)
@@ -128,9 +131,6 @@ static void imuAddBiasValue(BiasObj* bias, Axis3i16* dVal);
 static void imuAccIIRLPFilter(Axis3i16* in, Axis3i16* out,
                               Axis3i32* storedValues, int32_t attenuation);
 static void imuAccAlignToGravity(Axis3i16* in, Axis3i16* out);
-
-// TODO: Fix __errno linker error with math lib
-int __attribute__((used)) __errno;
 
 static bool isInit;
 
@@ -225,10 +225,10 @@ void imu6Init(void)
   varianceSampleTime = -GYRO_MIN_BIAS_TIMEOUT_MS + 1;
   imuAccLpfAttFactor = IMU_ACC_IIR_LPF_ATT_FACTOR;
 
-  cosPitch = cos(configblockGetCalibPitch() * M_PI/180);
-  sinPitch = sin(configblockGetCalibPitch() * M_PI/180);
-  cosRoll = cos(configblockGetCalibRoll() * M_PI/180);
-  sinRoll = sin(configblockGetCalibRoll() * M_PI/180);
+  cosPitch = cosf(configblockGetCalibPitch() * (float) M_PI/180);
+  sinPitch = sinf(configblockGetCalibPitch() * (float) M_PI/180);
+  cosRoll = cosf(configblockGetCalibRoll() * (float) M_PI/180);
+  sinRoll = sinf(configblockGetCalibRoll() * (float) M_PI/180);
 
   isInit = true;
 }
@@ -289,10 +289,10 @@ bool imu6ManufacturingTest(void)
     if (gyroBias.isBiasValueFound)
     {
       // Calculate pitch and roll based on accelerometer. Board must be level
-      pitch = tan(-acc.x/(sqrt(acc.y*acc.y + acc.z*acc.z))) * 180/M_PI;
-      roll = tan(acc.y/acc.z) * 180/M_PI;
+      pitch = tanf(-acc.x/(sqrtf(acc.y*acc.y + acc.z*acc.z))) * 180/(float) M_PI;
+      roll = tanf(acc.y/acc.z) * 180/(float) M_PI;
 
-      if ((fabs(roll) < IMU_MAN_TEST_LEVEL_MAX) && (fabs(pitch) < IMU_MAN_TEST_LEVEL_MAX))
+      if ((fabsf(roll) < IMU_MAN_TEST_LEVEL_MAX) && (fabsf(pitch) < IMU_MAN_TEST_LEVEL_MAX))
       {
         DEBUG_PRINT("Acc level test [OK]\n");
         testStatus = true;
@@ -329,6 +329,7 @@ void imu6Read(Axis3f* gyroOut, Axis3f* accOut)
     imuFindBiasValue(&gyroBias);
     if (gyroBias.isBiasValueFound)
     {
+      soundSetEffect(SND_CALIB);
       ledseqRun(SYS_LED, seq_calibrated);
     }
   }

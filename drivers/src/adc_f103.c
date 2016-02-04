@@ -1,6 +1,6 @@
 /**
- *    ||          ____  _ __                           
- * +------+      / __ )(_) /_______________ _____  ___ 
+ *    ||          ____  _ __
+ * +------+      / __ )(_) /_______________ _____  ___
  * | 0xBC |     / __  / / __/ ___/ ___/ __ `/_  / / _ \
  * +------+    / /_/ / / /_/ /__/ /  / /_/ / / /_/  __/
  *  ||  ||    /_____/_/\__/\___/_/   \__,_/ /___/\___/
@@ -72,10 +72,10 @@ static void adcDmaInit(void)
 {
   DMA_InitTypeDef DMA_InitStructure;
 
-  RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA1, ENABLE);
+  RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
 
   // DMA channel1 configuration
-  DMA_DeInit(DMA_Channel_1);
+  DMA_DeInit(DMA1_Channel1);
   DMA_InitStructure.DMA_PeripheralBaseAddr = (uint32_t)&ADC1->DR;
   DMA_InitStructure.DMA_MemoryBaseAddr = (uint32_t)&adcValues;
   DMA_InitStructure.DMA_DIR = DMA_DIR_PeripheralSRC;
@@ -227,8 +227,8 @@ void adcInit(void)
 
   adcQueue = xQueueCreate(1, sizeof(AdcGroup*));
 
-  xTaskCreate(adcTask, (const signed char * const)"ADC",
-              configMINIMAL_STACK_SIZE, NULL, /*priority*/3, NULL);
+  xTaskCreate(adcTask, ADC_TASK_NAME,
+              ADC_TASK_STACKSIZE, NULL, ADC_TASK_PRI, NULL);
 
   isInit = true;
 }
@@ -303,4 +303,8 @@ void adcTask(void *param)
 void proxSensorUpdate(AdcGroup* adcValues)
 {
     proxim = (uint32_t) (adcConvertToVoltageFloat(adcValues->vprox.val, adcValues->vprox.vref) / PROX_CONST);
+}
+void __attribute__((used)) DMA1_Channel1_IRQHandler(void)
+{
+  adcInterruptHandler();
 }

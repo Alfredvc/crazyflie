@@ -36,8 +36,10 @@
 #include "log.h"
 #include "eskylink.h"
 #include "radiolink.h"
+#include "nrf24link.h"
 #include "usblink.h"
 #include "platformservice.h"
+#include "syslink.h"
 
 static bool isInit;
 
@@ -45,28 +47,34 @@ void commInit(void)
 {
   if (isInit)
     return;
-
-#ifdef USE_ESKYLINK
-  eskylinkInit();
+#ifdef PLATFORM_CF1
+  #ifdef USE_ESKYLINK
+    eskylinkInit();
+  #else
+    nrf24linkInit();
+  #endif
 #else
-
-  usblinkInit();
   radiolinkInit();
-  //nrf24linkInit();
 #endif
 
-  crtpInit();
+  /* These functions are moved to be initialized early so
+   * that DEBUG_PRINT can be used early */
+  // crtpInit();
+  // consoleInit();
 
 #ifdef USE_RADIOLINK_CRTP
   crtpSetLink(radiolinkGetLink());
 #elif defined(USE_ESKYLINK)
   crtpSetLink(eskylinkGetLink());
+#else
+  crtpSetLink(nrf24linkGetLink());
 #endif
 
   crtpserviceInit();
+#ifdef PLATFORM_CF2
   platformserviceInit();
+#endif
   logInit();
-  consoleInit();
   paramInit();
   
   //setup CRTP communication channel
@@ -83,17 +91,21 @@ bool commTest(void)
 {
   bool pass=isInit;
   
-  #ifdef USE_RADIOLINK_CRTP
-  pass &= radiolinkTest();
-  #elif defined(USE_ESKYLINK)
-  pass &= eskylinkTest();
+#ifdef PLATFORM_CF1
+  #ifdef USE_ESKYLINK
+    pass &= eskylinkTest();
   #else
-  //pass &= nrf24linkTest();
+    pass &= nrf24linkTest();
   #endif
+#else
+  pass &= radiolinkTest();
+#endif
   
   pass &= crtpTest();
   pass &= crtpserviceTest();
+#ifdef PLATFORM_CF2
   pass &= platformserviceTest();
+#endif
   pass &= consoleTest();
   pass &= paramTest();
   

@@ -28,7 +28,6 @@
 
 /*FreeRtos includes*/
 #include "FreeRTOS.h"
-#include "task.h"
 #include "semphr.h"
 
 #include "crtp.h"
@@ -78,6 +77,9 @@ bool consoleTest(void)
 int consolePutchar(int ch)
 {
   int i;
+
+  if (!isInit)
+    return 0;
 
   if (xSemaphoreTake(synch, portMAX_DELAY) == pdTRUE)
   {

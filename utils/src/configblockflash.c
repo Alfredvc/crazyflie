@@ -23,14 +23,15 @@
  *
  * configblock.c - Simple static implementation of the config block
  */
+#define DEBUG_MODULE "CFGBLK"
 
 #include <stdint.h>
 #include <stdbool.h>
 #include <unistd.h>
 
-#include "configblock.h"
-
 #include "config.h"
+#include "configblock.h"
+#include "debug.h"
 
 /* Internal format of the config block */
 #define MAGIC 0x43427830
@@ -71,14 +72,21 @@ int configblockInit(void)
   //Verify the config block
   if (configblock->magic!=MAGIC || configblock->version!= VERSION || 
       calculate_cksum(configblock, sizeof(*configblock)) )
+  {
+    DEBUG_PRINT("Verification [FAIL]\n");
     return -1;
+  }
+  else
+  {
+    DEBUG_PRINT("v%d, verification [OK]\n", configblock->version);
+    cb_ok = true;
+  }
 
-  cb_ok = true;
   
   return 0;
 }
 
-int configblockTest(void)
+bool configblockTest(void)
 {
   return true;
 }
@@ -89,7 +97,7 @@ int configblockGetRadioChannel(void)
   if (cb_ok)
     return configblock->radioChannel;
   else
-    return RADIO_CHANEL;
+    return RADIO_CHANNEL;
 }
 
 int configblockGetRadioSpeed(void)

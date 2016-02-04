@@ -31,11 +31,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#if defined (STM32F40_41xxx)
 #include "cpal.h"
-#endif
-
-//#include "stm32f10x_i2c.h"
 
 // Delay is approx 0.2us per loop @64Mhz
 #define I2CDEV_LOOPS_PER_US  5
@@ -46,11 +42,16 @@
 
 #define I2CDEV_NO_MEM_ADDR  0xFF
 
+
+#ifdef PLATFORM_CF1
+typedef I2C_TypeDef      I2C_Dev;
+#else
+typedef CPAL_InitTypeDef I2C_Dev;
 #define I2C1_DEV &I2C1_DevStructure
 #define I2C2_DEV &I2C2_DevStructure
 #define I2C3_DEV &I2C3_DevStructure
+#endif
 
-typedef CPAL_InitTypeDef I2C_Dev;
 
 /**
  * Read bytes from an I2C peripheral

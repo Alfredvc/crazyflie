@@ -41,6 +41,7 @@
 #include "log.h"
 #include "led.h"
 #include "ledseq.h"
+#include "queuemonitor.h"
 
 #define RADIOLINK_TX_QUEUE_SIZE (1)
 
@@ -68,15 +69,15 @@ void radiolinkInit(void)
   if (isInit)
     return;
 
-  syslinkInit();
-
   txQueue = xQueueCreate(RADIOLINK_TX_QUEUE_SIZE, sizeof(SyslinkPacket));
+  DEBUG_QUEUE_MONITOR_REGISTER(txQueue);
   crtpPacketDelivery = xQueueCreate(5, sizeof(CRTPPacket));
+  DEBUG_QUEUE_MONITOR_REGISTER(crtpPacketDelivery);
 
-  if (crtpPacketDelivery == 0)
-  {
-    return;
-  }
+
+  ASSERT(crtpPacketDelivery);
+
+  syslinkInit();
 
   radiolinkSetChannel(configblockGetRadioChannel());
   radiolinkSetDatarate(configblockGetRadioSpeed());
