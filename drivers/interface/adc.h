@@ -58,6 +58,8 @@
 
 #define ADC_INTERNAL_VREF   1.20
 
+#define PROX_CONST 0.0049
+
 /******** Types ********/
 
 typedef struct __attribute__((packed))
@@ -69,6 +71,7 @@ typedef struct __attribute__((packed))
 typedef struct __attribute__((packed))
 {
   AdcPair vbat;
+  AdcPair vprox;
 } AdcGroup;
 
 typedef struct
@@ -116,5 +119,7 @@ void adcInterruptHandler(void);
  * ADC task
  */
 void adcTask(void *param);
+
+void proxSensorUpdate(AdcGroup* adcValues);
 
 #endif /* ADC_H_ */
