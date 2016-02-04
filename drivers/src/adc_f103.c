@@ -146,6 +146,7 @@ void adcInit(void)
   GPIO_InitStructure.GPIO_Pin = GPIO_PROX;
   GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
   GPIO_InitStructure.GPIO_Speed = GPIO_Speed_10MHz;
+  GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_NOPULL;
   GPIO_Init(GPIOA, &GPIO_InitStructure);
 
   //Timer configuration
