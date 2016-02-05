@@ -58,7 +58,7 @@
 
 #define ADC_INTERNAL_VREF   1.20
 
-#define PROX_CONST 0.0049
+#define PROX_CONST 204.1
 
 /******** Types ********/
 

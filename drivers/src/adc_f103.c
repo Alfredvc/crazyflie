@@ -47,7 +47,7 @@
 
 // PORT A
 #define GPIO_VBAT        GPIO_Pin_3
-#define GPIO_PROX		 GPIO_Pin_6
+#define GPIO_PROX		 GPIO_Pin_5
 
 // CHANNELS
 #define NBR_OF_ADC_CHANNELS   2
@@ -61,11 +61,13 @@ static bool isInit;
 volatile AdcGroup adcValues[ADC_MEAN_SIZE * 2];
 //The proximity in cm from the sensor face
 static uint32_t proxim;
+static float proxim_voltage;
 
 xQueueHandle      adcQueue;
 
 LOG_GROUP_START(adc)
-LOG_ADD(LOG_INT32, vProx, &proxim)
+LOG_ADD(LOG_INT32, prox, &proxim)
+LOG_ADD(LOG_FLOAT, vProx, &proxim_voltage)
 LOG_GROUP_STOP(adc)
 
 static void adcDmaInit(void)
@@ -146,7 +148,6 @@ void adcInit(void)
   GPIO_InitStructure.GPIO_Pin = GPIO_PROX;
   GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
   GPIO_InitStructure.GPIO_Speed = GPIO_Speed_10MHz;
-  GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_NOPULL;
   GPIO_Init(GPIOA, &GPIO_InitStructure);
 
   //Timer configuration
@@ -303,7 +304,7 @@ void adcTask(void *param)
 
 void proxSensorUpdate(AdcGroup* adcValues)
 {
-    proxim = (uint32_t) (adcConvertToVoltageFloat(adcValues->vprox.val, adcValues->vprox.vref) / PROX_CONST);
+    proxim = (uint32_t) (adcConvertToVoltageFloat(adcValues->vprox.val, adcValues->vprox.vref) * PROX_CONST);
 }
 void __attribute__((used)) DMA1_Channel1_IRQHandler(void)
 {
