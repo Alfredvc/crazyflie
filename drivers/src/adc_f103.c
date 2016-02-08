@@ -55,19 +55,21 @@
 
 #define CH_VREF               ADC_Channel_17
 #define CH_TEMP               ADC_Channel_16
-#define CH_PROX				  ADC_Channel_6
+#define CH_PROX				  ADC_Channel_5
 
 static bool isInit;
 volatile AdcGroup adcValues[ADC_MEAN_SIZE * 2];
 //The proximity in cm from the sensor face
 static uint32_t proxim;
 static float proxim_voltage;
+static float test;
 
 xQueueHandle      adcQueue;
 
 LOG_GROUP_START(adc)
 LOG_ADD(LOG_INT32, prox, &proxim)
 LOG_ADD(LOG_FLOAT, vProx, &proxim_voltage)
+LOG_ADD(LOG_FLOAT, vTest, &test)
 LOG_GROUP_STOP(adc)
 
 static void adcDmaInit(void)
@@ -304,7 +306,11 @@ void adcTask(void *param)
 
 void proxSensorUpdate(AdcGroup* adcValues)
 {
-    proxim = (uint32_t) (adcConvertToVoltageFloat(adcValues->vprox.val, adcValues->vprox.vref) * PROX_CONST);
+	float thisVoltage = adcConvertToVoltageFloat(adcValues->vprox.val, adcValues->vprox.vref);
+    proxim = (uint32_t) ( thisVoltage * PROX_CONST);
+	proxim_voltage = adcValues->vprox.val;
+    test=adcValues->vprox.vref;
+
 }
 void __attribute__((used)) DMA1_Channel1_IRQHandler(void)
 {
