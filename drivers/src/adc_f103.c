@@ -39,6 +39,7 @@
 #include "nvicconf.h"
 #include "imu.h"
 #include "log.h"
+#include "range_sensors.h"
 
 #ifdef ADC_OUTPUT_RAW_DATA
 #include "uart.h"
@@ -47,7 +48,12 @@
 
 // PORT A
 #define GPIO_VBAT        GPIO_Pin_3
+//Ultrasonic sensor
 #define GPIO_PROX		 GPIO_Pin_5
+//Long range infrared sensor
+#define GPIO_IRLR		 GPIO_Pin_4
+//Short range infrared sensor
+#define GPIO_IRSR		 GPIO_Pin_6
 
 // CHANNELS
 #define NBR_OF_ADC_CHANNELS   2
@@ -56,21 +62,12 @@
 #define CH_VREF               ADC_Channel_17
 #define CH_TEMP               ADC_Channel_16
 #define CH_PROX				  ADC_Channel_5
+#define CH_IRLR				  ADC_Channel_4
+#define CH_SRLR               ADC_Channel_6
 
 static bool isInit;
 volatile AdcGroup adcValues[ADC_MEAN_SIZE * 2];
-//The proximity in cm from the sensor face
-static uint32_t proxim;
-static float proxim_voltage;
-static float test;
-
 xQueueHandle      adcQueue;
-
-LOG_GROUP_START(adc)
-LOG_ADD(LOG_INT32, prox, &proxim)
-LOG_ADD(LOG_FLOAT, vProx, &proxim_voltage)
-LOG_ADD(LOG_FLOAT, vTest, &test)
-LOG_GROUP_STOP(adc)
 
 static void adcDmaInit(void)
 {
@@ -307,9 +304,7 @@ void adcTask(void *param)
 void proxSensorUpdate(AdcGroup* adcValues)
 {
 	float thisVoltage = adcConvertToVoltageFloat(adcValues->vprox.val, adcValues->vprox.vref);
-    proxim = (uint32_t) ( thisVoltage * PROX_CONST);
-	proxim_voltage = adcValues->vprox.val;
-    test=adcValues->vprox.vref;
+    setProximityReading(thisVoltage * PROX_CONST);
 
 }
 void __attribute__((used)) DMA1_Channel1_IRQHandler(void)

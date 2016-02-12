@@ -41,10 +41,11 @@
 #include "pid.h"
 #include "param.h"
 #include "sitaw.h"
+#include "range_sensors.h"
 #ifdef PLATFORM_CF1
-  #include "ms5611.h"
+#include "ms5611.h"
 #else
-  #include "lps25h.h"
+#include "lps25h.h"
 #endif
 
 
@@ -62,7 +63,8 @@
 
 // Barometer/ Altitude hold stuff
 #define ALTHOLD_UPDATE_RATE_DIVIDER  5 // 500hz/5 = 100hz for barometer measurements
-#define ALTHOLD_UPDATE_DT  (float)(1.0 / (IMU_UPDATE_FREQ / ALTHOLD_UPDATE_RATE_DIVIDER))   // 500hz
+#define ALTHOLD_UPDATE_DT  (float)(1.0 / (IMU_UPDATE_FREQ / ALTHOLD_UPDATE_RATE_DIVIDER))   // 0.01s
+#define ALTHOLD_UPDATE_FREQUENCY (float) (1.0 / ALTHOLD_UPDATE_DT)  // 100hz
 
 static Axis3f gyro; // Gyro axis data in deg/s
 static Axis3f acc;  // Accelerometer axis data in mG
@@ -85,6 +87,7 @@ static float asl;         // smoothed asl
 static float aslRaw;      // raw asl
 static float aslLong;     // long term asl
 static float aslRef;      // asl reference (ie. offset)
+static float aslInitial;
 
 // Altitude hold variables
 static PidObject altHoldPID;  // Used for altitute hold mode. I gets reset when the bat status changes
@@ -121,6 +124,25 @@ static uint16_t altHoldMinThrust    = 00000; // minimum hover thrust - not used 
 static uint16_t altHoldBaseThrust   = 43000; // approximate throttle needed when in perfect hover. More weight/older battery can use a higher value
 static uint16_t altHoldMaxThrust    = 60000; // max altitude hold thrust
 
+// Range sensors
+static float proximity;
+static float proximityRaw;
+static float proximityLong;
+static float proximityAlpha = 0.2;
+static float proximityAlphaLong = 0.93;
+static PidObject altHoldProximPID;
+static float altHoldProximKp = 0.5;
+static float altHoldProximKi = 0.18;
+static float altHoldProximKd = 0.0;
+static float vSpeedProximityDeadband = 0.05; // Vertical speed based on proximity readings deadband
+static float vSpeedProximity = 0;
+static float vSpeedAccProximity = 0;
+static float altHoldPIDProximVal;
+static float yPosASL = 0;
+static float yPosAcc = 0;
+static float yPosProximity = 0;
+static float baroHeight;
+
 #if defined(SITAW_ENABLED)
 // Automatic take-off variables
 static bool autoTOActive           = false; // Flag indicating if automatic take-off is active / deactive.
@@ -128,7 +150,7 @@ static float autoTOAltBase         = 0.0f;  // Base altitude for the automatic t
 static float autoTOAltCurrent      = 0.0f;  // Current target altitude adjustment. Equals 0 when function is activated, increases to autoTOThresh when function is deactivated.
 // Automatic take-off parameters
 static float autoTOAlpha           = 0.98f; // Smoothing factor when adjusting the altHoldTarget altitude.
-static float autoTOTargetAdjust    = 1.5f;  // Meters to add to altHoldTarget to reach auto take-off altitude.
+static float autoTOTargetAdjust    = 0.5f;  // Meters to add to altHoldTarget to reach auto take-off altitude.
 static float autoTOThresh          = 0.97f; // Threshold for when to deactivate auto Take-Off. A value of 0.97 means 97% of the target altitude adjustment.
 #endif
 
@@ -145,14 +167,18 @@ uint32_t motorPowerM3;  // Motor 3 power output (16bit value used: 0 - 65535)
 uint32_t motorPowerM4;  // Motor 4 power output (16bit value used: 0 - 65535)
 
 static bool isInit;
+// Whether or not the stabilization loop has been called before
+static bool stabilizedOnce = false;
 
 
 static void stabilizerAltHoldUpdate(void);
+static void stabilizerAltHoldUpdateProximity(void);
+static void betterStabilizerAltHoldUpdateProximity(void);
 static void stabilizerRotateYaw(float yawRad);
 static void stabilizerRotateYawCarefree(bool reset);
 static void stabilizerYawModeUpdate(void);
 static void distributePower(const uint16_t thrust, const int16_t roll,
-                            const int16_t pitch, const int16_t yaw);
+		const int16_t pitch, const int16_t yaw);
 static uint16_t limitThrust(int32_t value);
 static void stabilizerTask(void* param);
 static float constrain(float value, const float minVal, const float maxVal);
@@ -160,338 +186,526 @@ static float deadband(float value, const float threshold);
 
 void stabilizerInit(void)
 {
-  if(isInit)
-    return;
+	if(isInit)
+		return;
 
-  motorsInit(motorMapDefaultBrushed);
-  imu6Init();
-  sensfusion6Init();
-  controllerInit();
+	motorsInit(motorMapDefaultBrushed);
+	imu6Init();
+	sensfusion6Init();
+	controllerInit();
 #if defined(SITAW_ENABLED)
-  sitAwInit();
+	sitAwInit();
 #endif
 
-  rollRateDesired = 0;
-  pitchRateDesired = 0;
-  yawRateDesired = 0;
+	rollRateDesired = 0;
+	pitchRateDesired = 0;
+	yawRateDesired = 0;
 
-  xTaskCreate(stabilizerTask, STABILIZER_TASK_NAME,
-              STABILIZER_TASK_STACKSIZE, NULL, STABILIZER_TASK_PRI, NULL);
+	xTaskCreate(stabilizerTask, STABILIZER_TASK_NAME,
+			STABILIZER_TASK_STACKSIZE, NULL, STABILIZER_TASK_PRI, NULL);
 
-  isInit = true;
+	isInit = true;
 }
 
 bool stabilizerTest(void)
 {
-  bool pass = true;
+	bool pass = true;
 
-  pass &= motorsTest();
-  pass &= imu6Test();
-  pass &= sensfusion6Test();
-  pass &= controllerTest();
+	pass &= motorsTest();
+	pass &= imu6Test();
+	pass &= sensfusion6Test();
+	pass &= controllerTest();
 
-  return pass;
+	return pass;
 }
 
 static void stabilizerPostAttitudeUpdateCallOut(void)
 {
-  /* Code that shall run AFTER each attitude update, should be placed here. */
+	/* Code that shall run AFTER each attitude update, should be placed here. */
 
 #if defined(SITAW_ENABLED)
-  /* Test values for Free Fall detection. */
-  sitAwFFTest(accWZ, accMAG);
+	/* Test values for Free Fall detection. */
+	sitAwFFTest(accWZ, accMAG);
 
-  /* Test values for Tumbled detection. */
-  sitAwTuTest(eulerRollActual, eulerPitchActual);
+	/* Test values for Tumbled detection. */
+	sitAwTuTest(eulerRollActual, eulerPitchActual);
 
-  /* Test values for At Rest detection. */
-  sitAwARTest(acc.x, acc.y, acc.z);
+	/* Test values for At Rest detection. */
+	sitAwARTest(acc.x, acc.y, acc.z);
 
-  /* Enable altHold mode if free fall is detected. */
-  if(sitAwFFDetected() && !sitAwTuDetected()) {
-    commanderSetAltHoldMode(true);
-  }
+	/* Enable altHold mode if free fall is detected. */
+	if(sitAwFFDetected() && !sitAwTuDetected()) {
+		commanderSetAltHoldMode(true);
+	}
 
-  /* Disable altHold mode if a Tumbled situation is detected. */
-  if(sitAwTuDetected()) {
-    commanderSetAltHoldMode(false);
-  }
+	/* Disable altHold mode if a Tumbled situation is detected. */
+	if(sitAwTuDetected()) {
+		commanderSetAltHoldMode(false);
+	}
 #endif
 }
 
 static void stabilizerPreThrustUpdateCallOut(void)
 {
-  /* Code that shall run BEFORE each thrust distribution update, should be placed here. */
+	/* Code that shall run BEFORE each thrust distribution update, should be placed here. */
 
 #if defined(SITAW_ENABLED)
-      if(sitAwTuDetected()) {
-        /* Kill the thrust to the motors if a Tumbled situation is detected. */
-        actuatorThrust = 0;
-      }
+	if(sitAwTuDetected()) {
+		/* Kill the thrust to the motors if a Tumbled situation is detected. */
+		actuatorThrust = 0;
+	}
 #endif
 }
 
 static void stabilizerTask(void* param)
 {
-  RPYType rollType;
-  RPYType pitchType;
-  RPYType yawType;
-  uint32_t attitudeCounter = 0;
-  uint32_t altHoldCounter = 0;
-  uint32_t lastWakeTime;
-  float yawRateAngle = 0;
+	RPYType rollType;
+	RPYType pitchType;
+	RPYType yawType;
+	uint32_t attitudeCounter = 0;
+	uint32_t altHoldCounter = 0;
+	uint32_t lastWakeTime;
+	float yawRateAngle = 0;
 
-  vTaskSetApplicationTaskTag(0, (void*)TASK_STABILIZER_ID_NBR);
+	vTaskSetApplicationTaskTag(0, (void*)TASK_STABILIZER_ID_NBR);
 
-  //Wait for the system to be fully started to start stabilization loop
-  systemWaitStart();
+	//Wait for the system to be fully started to start stabilization loop
+	systemWaitStart();
 
-  lastWakeTime = xTaskGetTickCount ();
+	lastWakeTime = xTaskGetTickCount ();
 
-  while(1)
-  {
-    vTaskDelayUntil(&lastWakeTime, F2T(IMU_UPDATE_FREQ)); // 500Hz
+	while(1)
+	{
+		vTaskDelayUntil(&lastWakeTime, F2T(IMU_UPDATE_FREQ)); // 500Hz
 
-    // Magnetometer not yet used more then for logging.
-    imu9Read(&gyro, &acc, &mag);
+		// Magnetometer not yet used more then for logging.
+		imu9Read(&gyro, &acc, &mag);
 
-    if (imu6IsCalibrated())
-    {
-      commanderGetRPY(&eulerRollDesired, &eulerPitchDesired, &eulerYawDesired);
-      commanderGetRPYType(&rollType, &pitchType, &yawType);
+		if (imu6IsCalibrated())
+		{
+			commanderGetRPY(&eulerRollDesired, &eulerPitchDesired, &eulerYawDesired);
+			commanderGetRPYType(&rollType, &pitchType, &yawType);
 
-      // Rate-controled YAW is moving YAW angle setpoint
-      if (yawType == RATE) {
-        yawRateAngle -= eulerYawDesired/500.0;
-        while (yawRateAngle > 180.0)
-          yawRateAngle -= 360.0;
-        while (yawRateAngle < -180.0)
-          yawRateAngle += 360.0;
+			// Rate-controled YAW is moving YAW angle setpoint
+			if (yawType == RATE) {
+				yawRateAngle -= eulerYawDesired/500.0;
+				while (yawRateAngle > 180.0)
+					yawRateAngle -= 360.0;
+				while (yawRateAngle < -180.0)
+					yawRateAngle += 360.0;
 
-        eulerYawDesired = -yawRateAngle;
-      }
+				eulerYawDesired = -yawRateAngle;
+			}
 
-      // 250HZ
-      if (++attitudeCounter >= ATTITUDE_UPDATE_RATE_DIVIDER)
-      {
-        sensfusion6UpdateQ(gyro.x, gyro.y, gyro.z, acc.x, acc.y, acc.z, FUSION_UPDATE_DT);
-        sensfusion6GetEulerRPY(&eulerRollActual, &eulerPitchActual, &eulerYawActual);
+			// 250HZ
+			if (++attitudeCounter >= ATTITUDE_UPDATE_RATE_DIVIDER)
+			{
+				sensfusion6UpdateQ(gyro.x, gyro.y, gyro.z, acc.x, acc.y, acc.z, FUSION_UPDATE_DT);
+				sensfusion6GetEulerRPY(&eulerRollActual, &eulerPitchActual, &eulerYawActual);
 
-        accWZ = sensfusion6GetAccZWithoutGravity(acc.x, acc.y, acc.z);
-        accMAG = (acc.x*acc.x) + (acc.y*acc.y) + (acc.z*acc.z);
-        // Estimate speed from acc (drifts)
-        vSpeed += deadband(accWZ, vAccDeadband) * FUSION_UPDATE_DT;
+				accWZ = sensfusion6GetAccZWithoutGravity(acc.x, acc.y, acc.z);
+				accMAG = (acc.x*acc.x) + (acc.y*acc.y) + (acc.z*acc.z);
+				// Estimate speed from acc (drifts)
+				vSpeed += deadband(accWZ, vAccDeadband) * FUSION_UPDATE_DT;
 
-        // Adjust yaw if configured to do so
-        stabilizerYawModeUpdate();
+				// Adjust yaw if configured to do so
+				stabilizerYawModeUpdate();
 
-        controllerCorrectAttitudePID(eulerRollActual, eulerPitchActual, eulerYawActual,
-                                     eulerRollDesired, eulerPitchDesired, -eulerYawDesired,
-                                     &rollRateDesired, &pitchRateDesired, &yawRateDesired);
-        attitudeCounter = 0;
+				controllerCorrectAttitudePID(eulerRollActual, eulerPitchActual, eulerYawActual,
+						eulerRollDesired, eulerPitchDesired, -eulerYawDesired,
+						&rollRateDesired, &pitchRateDesired, &yawRateDesired);
+				attitudeCounter = 0;
 
-        /* Call out after performing attitude updates, if any functions would like to use the calculated values. */
-        stabilizerPostAttitudeUpdateCallOut();
-      }
+				/* Call out after performing attitude updates, if any functions would like to use the calculated values. */
+				stabilizerPostAttitudeUpdateCallOut();
+			}
 
-      // 100HZ
-      if (imuHasBarometer() && (++altHoldCounter >= ALTHOLD_UPDATE_RATE_DIVIDER))
-      {
-        stabilizerAltHoldUpdate();
-        altHoldCounter = 0;
-      }
+			// 100HZ
+			if (imuHasBarometer() && (++altHoldCounter >= ALTHOLD_UPDATE_RATE_DIVIDER))
+			{
+				//stabilizerAltHoldUpdate();
+				betterStabilizerAltHoldUpdateProximity();
+				altHoldCounter = 0;
+				if (!stabilizedOnce) stabilizedOnce = true;
+			}
 
-      if (rollType == RATE)
-      {
-        rollRateDesired = eulerRollDesired;
-      }
-      if (pitchType == RATE)
-      {
-        pitchRateDesired = eulerPitchDesired;
-      }
+			if (rollType == RATE)
+			{
+				rollRateDesired = eulerRollDesired;
+			}
+			if (pitchType == RATE)
+			{
+				pitchRateDesired = eulerPitchDesired;
+			}
 
-      // TODO: Investigate possibility to subtract gyro drift.
-      controllerCorrectRatePID(gyro.x, -gyro.y, gyro.z,
-                               rollRateDesired, pitchRateDesired, yawRateDesired);
+			// TODO: Investigate possibility to subtract gyro drift.
+			controllerCorrectRatePID(gyro.x, -gyro.y, gyro.z,
+					rollRateDesired, pitchRateDesired, yawRateDesired);
 
-      controllerGetActuatorOutput(&actuatorRoll, &actuatorPitch, &actuatorYaw);
+			controllerGetActuatorOutput(&actuatorRoll, &actuatorPitch, &actuatorYaw);
 
-      if (!altHold || !imuHasBarometer())
-      {
-        // Use thrust from controller if not in altitude hold mode
-        commanderGetThrust(&actuatorThrust);
-      }
-      else
-      {
-        // Added so thrust can be set to 0 while in altitude hold mode after disconnect
-        commanderWatchdog();
-      }
+			if (!altHold || !imuHasBarometer())
+			{
+				// Use thrust from controller if not in altitude hold mode
+				commanderGetThrust(&actuatorThrust);
+			}
+			else
+			{
+				// Added so thrust can be set to 0 while in altitude hold mode after disconnect
+				commanderWatchdog();
+			}
 
-      /* Call out before performing thrust updates, if any functions would like to influence the thrust. */
-      stabilizerPreThrustUpdateCallOut();
+			/* Call out before performing thrust updates, if any functions would like to influence the thrust. */
+			stabilizerPreThrustUpdateCallOut();
 
-      if (actuatorThrust > 0)
-      {
+			if (actuatorThrust > 0)
+			{
 #if defined(TUNE_ROLL)
-        distributePower(actuatorThrust, actuatorRoll, 0, 0);
+				distributePower(actuatorThrust, actuatorRoll, 0, 0);
 #elif defined(TUNE_PITCH)
-        distributePower(actuatorThrust, 0, actuatorPitch, 0);
+				distributePower(actuatorThrust, 0, actuatorPitch, 0);
 #elif defined(TUNE_YAW)
-        distributePower(actuatorThrust, 0, 0, -actuatorYaw);
+				distributePower(actuatorThrust, 0, 0, -actuatorYaw);
 #else
-        distributePower(actuatorThrust, actuatorRoll, actuatorPitch, -actuatorYaw);
+				distributePower(actuatorThrust, actuatorRoll, actuatorPitch, -actuatorYaw);
 #endif
-      }
-      else
-      {
-        distributePower(0, 0, 0, 0);
-        controllerResetAllPID();
+			}
+			else
+			{
+				distributePower(0, 0, 0, 0);
+				controllerResetAllPID();
 
-        // Reset the calculated YAW angle for rate control
-        yawRateAngle = eulerYawActual;
-      }
-    }
-  }
+				// Reset the calculated YAW angle for rate control
+				yawRateAngle = eulerYawActual;
+			}
+		}
+	}
 }
 
 static void stabilizerPreAltHoldComputeThrustCallOut(void)
 {
-  /* Code that shall run BEFORE each altHold thrust computation, should be placed here. */
+	/* Code that shall run BEFORE each altHold thrust computation, should be placed here. */
 
 #if defined(SITAW_ENABLED)
-  /*
-   * The number of variables used for automatic Take-Off could be reduced, however that would
-   * cause debugging and tuning to become more difficult. The variables currently used ensure
-   * that tuning can easily be done through the LOG and PARAM frameworks.
-   *
-   * Note that while the automatic take-off function is active, it will overrule any other
-   * changes to altHoldTarget by the user.
-   *
-   * The automatic take-off function will automatically deactivate once the take-off has been
-   * conducted.
-   */
-  if(!autoTOActive){
-    /*
-     * Enabling automatic take-off: When At Rest, Not Tumbled, and the user pressing the AltHold button
-     */
-    if(sitAwARDetected() && !sitAwTuDetected() && setAltHold) {
-      /* Enable automatic take-off. */
-      autoTOActive = true;
-      autoTOAltBase = altHoldTarget;
-      autoTOAltCurrent = 0.0f;
-    }
-  }
+	/*
+	 * The number of variables used for automatic Take-Off could be reduced, however that would
+	 * cause debugging and tuning to become more difficult. The variables currently used ensure
+	 * that tuning can easily be done through the LOG and PARAM frameworks.
+	 *
+	 * Note that while the automatic take-off function is active, it will overrule any other
+	 * changes to altHoldTarget by the user.
+	 *
+	 * The automatic take-off function will automatically deactivate once the take-off has been
+	 * conducted.
+	 */
+	if(!autoTOActive){
+		/*
+		 * Enabling automatic take-off: When At Rest, Not Tumbled, and the user pressing the AltHold button
+		 */
+		if(sitAwARDetected() && !sitAwTuDetected() && setAltHold) {
+			/* Enable automatic take-off. */
+			autoTOActive = true;
+			autoTOAltBase = altHoldTarget;
+			autoTOAltCurrent = 0.0f;
+		}
+	}
 
-  if(autoTOActive) {
-    /*
-     * Automatic take-off is quite simple: Slowly increase altHoldTarget until reaching the target altitude.
-     */
+	if(autoTOActive) {
+		/*
+		 * Automatic take-off is quite simple: Slowly increase altHoldTarget until reaching the target altitude.
+		 */
 
-    /* Calculate the new current setpoint for altHoldTarget. autoTOAltCurrent is normalized to values from 0 to 1. */
-    autoTOAltCurrent = autoTOAltCurrent * autoTOAlpha + (1 - autoTOAlpha);
+		/* Calculate the new current setpoint for altHoldTarget. autoTOAltCurrent is normalized to values from 0 to 1. */
+		autoTOAltCurrent = autoTOAltCurrent * autoTOAlpha + (1 - autoTOAlpha);
 
-    /* Update the altHoldTarget variable. */
-    altHoldTarget = autoTOAltBase + autoTOAltCurrent * autoTOTargetAdjust;
+		/* Update the altHoldTarget variable. */
+		altHoldTarget = autoTOAltBase + autoTOAltCurrent * autoTOTargetAdjust;
 
-    if((autoTOAltCurrent >= autoTOThresh)) {
-      /* Disable the automatic take-off mode if target altitude has been reached. */
-      autoTOActive = false;
-      autoTOAltBase = 0.0f;
-      autoTOAltCurrent = 0.0f;
-    }
-  }
+		if((autoTOAltCurrent >= autoTOThresh)) {
+			/* Disable the automatic take-off mode if target altitude has been reached. */
+			autoTOActive = false;
+			autoTOAltBase = 0.0f;
+			autoTOAltCurrent = 0.0f;
+		}
+	}
 #endif
+}
+
+static void betterStabilizerAltHoldUpdateProximity(void){
+	commanderGetAltHold(&altHold, &setAltHold, &altHoldChange);
+	getProximityReading(&proximityRaw);
+	#ifdef PLATFORM_CF1
+		ms5611GetData(&pressure, &temperature, &aslRaw);
+	#else
+		lps25hGetData(&pressure, &temperature, &aslRaw);
+	#endif
+
+	//Update vSpeedProximity
+	float previousProximity = proximity;
+	// Smoothing the proximity reading
+	proximity = proximity * proximityAlpha + proximityRaw * (1 - proximityAlpha);
+
+	if (!stabilizedOnce) {
+		previousProximity = proximity;
+		baroHeight = 0;
+		aslRef = aslRaw;
+	}
+
+	// Estimate vertical speed based on successive proximity readings
+	vSpeedProximity = deadband((proximity - previousProximity) * ALTHOLD_UPDATE_FREQUENCY , vSpeedProximityDeadband);
+
+	// Update vSpeedASL
+	aslRaw -= aslRef;
+	float previousAsl = asl;
+	// Smoothing the ASL reading
+	asl = asl * aslAlpha + aslRaw * (1 - aslAlpha);
+	// Estimate vertical speed based on successive barometer readings.
+
+	baroHeight = asl;
+
+	vSpeedASL = deadband(asl - previousAsl, vSpeedASLDeadband);
+
+	// Estimate vertical speed fusing baro, acc and proximity
+	//vSpeed = constrain(vSpeed, -vSpeedLimit, vSpeedLimit);
+	//vSpeed = vSpeed * vBiasAlpha + vSpeedProximity * (1.f - vBiasAlpha);
+	vSpeedAccProximity = vSpeed;
+
+	yPosASL += vSpeedASL * ALTHOLD_UPDATE_DT;
+	yPosAcc += vSpeed * ALTHOLD_UPDATE_DT;
+	yPosProximity += vSpeedProximity * ALTHOLD_UPDATE_DT;
+
+	if (!pmIsDischarging())
+	{
+		altHoldProximPID.integ = 0.0;
+	}
+
+	// Altitude hold mode just activated, set target altitude as current altitude. Reuse previous integral term as a starting point
+	if (setAltHold)
+	{
+		// Set to current altitude
+		altHoldTarget = proximity;
+
+		// Cache last integral term for reuse after pid init
+		const float pre_integral = altHoldProximPID.integ;
+
+		// Reset PID controller
+		pidInit(&altHoldProximPID, proximity, altHoldKp, altHoldKi, altHoldKd,
+				ALTHOLD_UPDATE_DT);
+		// TODO set low and high limits depending on voltage
+		// TODO for now just use previous I value and manually set limits for whole voltage range
+		//                    pidSetIntegralLimit(&altHoldPID, 12345);
+		//                    pidSetIntegralLimitLow(&altHoldPID, 12345);              /
+
+		altHoldProximPID.integ = pre_integral;
+
+		// Reset altHoldPID
+		altHoldPIDProximVal = pidUpdate(&altHoldProximPID, proximity, false);
+	}
+	/* Call out before performing altHold thrust regulation. */
+	stabilizerPreAltHoldComputeThrustCallOut();
+
+	// In altitude hold mode
+	if (altHold)
+	{
+		// Update target altitude from joy controller input
+		altHoldTarget += altHoldChange / altHoldChange_SENS;
+		pidSetDesired(&altHoldProximPID, altHoldTarget);
+
+		// Compute error (current - target), limit the error
+		altHoldErr = constrain(deadband(proximity - altHoldTarget, errDeadband),
+				-altHoldErrMax, altHoldErrMax);
+		pidSetError(&altHoldProximPID, -altHoldErr);
+
+		// Get control from PID controller, dont update the error (done above)
+		// Smooth it and include barometer vspeed
+		// TODO same as smoothing the error??
+		altHoldPIDProximVal = (pidAlpha) * altHoldPIDProximVal + (1.f - pidAlpha) * ((vSpeedAccProximity * vSpeedAccFac) +
+				(vSpeedProximity * vSpeedASLFac) + pidUpdate(&altHoldProximPID, proximity, false));
+
+		// compute new thrust
+		actuatorThrust =  max(altHoldMinThrust, min(altHoldMaxThrust,
+				limitThrust( altHoldBaseThrust + (int32_t)(altHoldPIDProximVal*pidAslFac))));
+
+		// i part should compensate for voltage drop
+
+	}
+	else
+	{
+		altHoldTarget = 0.0;
+		altHoldErr = 0.0;
+		altHoldPIDVal = 0.0;
+	}
+
+}
+
+static void stabilizerAltHoldUpdateProximity(void){
+	commanderGetAltHold(&altHold, &setAltHold, &altHoldChange);
+	getProximityReading(&proximityRaw);
+
+	proximity = proximity * proximityAlpha + proximityRaw* (1 - proximityAlpha);
+	proximityLong = proximityLong * proximityAlphaLong + proximityRaw* (1 - proximityAlphaLong);
+
+	// Estimate vertical speed based on successive barometer readings. This is ugly :)
+	vSpeedProximity = deadband(proximity - proximityLong, vSpeedASLDeadband);
+
+	// Estimate vertical speed based on Acc - fused with baro to reduce drift
+	vSpeed = constrain(vSpeed, -vSpeedLimit, vSpeedLimit);
+	vSpeed = vSpeed * vBiasAlpha + vSpeedProximity * (1.f - vBiasAlpha);
+	vSpeedAccProximity = vSpeed;
+
+	if (!pmIsDischarging())
+	{
+		altHoldProximPID.integ = 0.0;
+	}
+
+	// Altitude hold mode just activated, set target altitude as current altitude. Reuse previous integral term as a starting point
+	if (setAltHold)
+	{
+		// Set to current altitude
+		altHoldTarget = proximity;
+
+		// Cache last integral term for reuse after pid init
+		const float pre_integral = altHoldProximPID.integ;
+
+		// Reset PID controller
+		pidInit(&altHoldProximPID, proximity, altHoldKp, altHoldKi, altHoldKd,
+				ALTHOLD_UPDATE_DT);
+		// TODO set low and high limits depending on voltage
+		// TODO for now just use previous I value and manually set limits for whole voltage range
+		//                    pidSetIntegralLimit(&altHoldPID, 12345);
+		//                    pidSetIntegralLimitLow(&altHoldPID, 12345);              /
+
+		altHoldProximPID.integ = pre_integral;
+
+		// Reset altHoldPID
+		altHoldPIDProximVal = pidUpdate(&altHoldProximPID, proximity, false);
+	}
+	/* Call out before performing altHold thrust regulation. */
+	stabilizerPreAltHoldComputeThrustCallOut();
+
+	// In altitude hold mode
+	if (altHold)
+	{
+		// Update target altitude from joy controller input
+		altHoldTarget += altHoldChange / altHoldChange_SENS;
+		pidSetDesired(&altHoldProximPID, altHoldTarget);
+
+		// Compute error (current - target), limit the error
+		altHoldErr = constrain(deadband(proximity - altHoldTarget, errDeadband),
+				-altHoldErrMax, altHoldErrMax);
+		pidSetError(&altHoldProximPID, -altHoldErr);
+
+		// Get control from PID controller, dont update the error (done above)
+		// Smooth it and include barometer vspeed
+		// TODO same as smoothing the error??
+		altHoldPIDProximVal = (pidAlpha) * altHoldPIDProximVal + (1.f - pidAlpha) * ((vSpeedAccProximity * vSpeedAccFac) +
+				(vSpeedProximity * vSpeedASLFac) + pidUpdate(&altHoldProximPID, proximity, false));
+
+		// compute new thrust
+		actuatorThrust =  max(altHoldMinThrust, min(altHoldMaxThrust,
+				limitThrust( altHoldBaseThrust + (int32_t)(altHoldPIDProximVal*pidAslFac))));
+
+		// i part should compensate for voltage drop
+
+	}
+	else
+	{
+		altHoldTarget = 0.0;
+		altHoldErr = 0.0;
+		altHoldPIDVal = 0.0;
+	}
+
 }
 
 static void stabilizerAltHoldUpdate(void)
 {
-  // Get altitude hold commands from pilot
-  commanderGetAltHold(&altHold, &setAltHold, &altHoldChange);
+	// Get altitude hold commands from pilot
+	commanderGetAltHold(&altHold, &setAltHold, &altHoldChange);
 
-  // Get barometer height estimates
-  //TODO do the smoothing within getData
+	// Get barometer height estimates
+	//TODO do the smoothing within getData
 #ifdef PLATFORM_CF1
-  ms5611GetData(&pressure, &temperature, &aslRaw);
+	ms5611GetData(&pressure, &temperature, &aslRaw);
 #else
-  lps25hGetData(&pressure, &temperature, &aslRaw);
+	lps25hGetData(&pressure, &temperature, &aslRaw);
 #endif
 
-  aslRaw -= aslRef;
+	aslRaw -= aslRef;
 
-  asl = asl * aslAlpha + aslRaw * (1 - aslAlpha);
-  aslLong = aslLong * aslAlphaLong + aslRaw * (1 - aslAlphaLong);
+	asl = asl * aslAlpha + aslRaw * (1 - aslAlpha);
+	aslLong = aslLong * aslAlphaLong + aslRaw * (1 - aslAlphaLong);
 
-  // Estimate vertical speed based on successive barometer readings. This is ugly :)
-  vSpeedASL = deadband(asl - aslLong, vSpeedASLDeadband);
+	// Estimate vertical speed based on successive barometer readings. This is ugly :)
+	vSpeedASL = deadband(asl - aslLong, vSpeedASLDeadband);
 
-  // Estimate vertical speed based on Acc - fused with baro to reduce drift
-  vSpeed = constrain(vSpeed, -vSpeedLimit, vSpeedLimit);
-  vSpeed = vSpeed * vBiasAlpha + vSpeedASL * (1.f - vBiasAlpha);
-  vSpeedAcc = vSpeed;
+	// Estimate vertical speed based on Acc - fused with baro to reduce drift
+	vSpeed = constrain(vSpeed, -vSpeedLimit, vSpeedLimit);
+	vSpeed = vSpeed * vBiasAlpha + vSpeedASL * (1.f - vBiasAlpha);
+	vSpeedAcc = vSpeed;
 
-  // Reset Integral gain of PID controller if being charged
-  if (!pmIsDischarging())
-  {
-    altHoldPID.integ = 0.0;
-  }
+	// Reset Integral gain of PID controller if being charged
+	if (!pmIsDischarging())
+	{
+		altHoldPID.integ = 0.0;
+	}
 
-  // Altitude hold mode just activated, set target altitude as current altitude. Reuse previous integral term as a starting point
-  if (setAltHold)
-  {
-    // Set to current altitude
-    altHoldTarget = asl;
+	// Altitude hold mode just activated, set target altitude as current altitude. Reuse previous integral term as a starting point
+	if (setAltHold)
+	{
+		// Set to current altitude
+		altHoldTarget = asl;
 
-    // Cache last integral term for reuse after pid init
-    const float pre_integral = altHoldPID.integ;
+		// Cache last integral term for reuse after pid init
+		const float pre_integral = altHoldPID.integ;
 
-    // Reset PID controller
-    pidInit(&altHoldPID, asl, altHoldKp, altHoldKi, altHoldKd,
-            ALTHOLD_UPDATE_DT);
-    // TODO set low and high limits depending on voltage
-    // TODO for now just use previous I value and manually set limits for whole voltage range
-    //                    pidSetIntegralLimit(&altHoldPID, 12345);
-    //                    pidSetIntegralLimitLow(&altHoldPID, 12345);              /
+		// Reset PID controller
+		pidInit(&altHoldPID, asl, altHoldKp, altHoldKi, altHoldKd,
+				ALTHOLD_UPDATE_DT);
+		// TODO set low and high limits depending on voltage
+		// TODO for now just use previous I value and manually set limits for whole voltage range
+		//                    pidSetIntegralLimit(&altHoldPID, 12345);
+		//                    pidSetIntegralLimitLow(&altHoldPID, 12345);              /
 
-    altHoldPID.integ = pre_integral;
+		altHoldPID.integ = pre_integral;
 
-    // Reset altHoldPID
-    altHoldPIDVal = pidUpdate(&altHoldPID, asl, false);
-  }
+		// Reset altHoldPID
+		altHoldPIDVal = pidUpdate(&altHoldPID, asl, false);
+	}
 
-  /* Call out before performing altHold thrust regulation. */
-  stabilizerPreAltHoldComputeThrustCallOut();
+	/* Call out before performing altHold thrust regulation. */
+	stabilizerPreAltHoldComputeThrustCallOut();
 
-  // In altitude hold mode
-  if (altHold)
-  {
-    // Update target altitude from joy controller input
-    altHoldTarget += altHoldChange / altHoldChange_SENS;
-    pidSetDesired(&altHoldPID, altHoldTarget);
+	// In altitude hold mode
+	if (altHold)
+	{
+		// Update target altitude from joy controller input
+		altHoldTarget += altHoldChange / altHoldChange_SENS;
+		pidSetDesired(&altHoldPID, altHoldTarget);
 
-    // Compute error (current - target), limit the error
-    altHoldErr = constrain(deadband(asl - altHoldTarget, errDeadband),
-                           -altHoldErrMax, altHoldErrMax);
-    pidSetError(&altHoldPID, -altHoldErr);
+		// Compute error (current - target), limit the error
+		altHoldErr = constrain(deadband(asl - altHoldTarget, errDeadband),
+				-altHoldErrMax, altHoldErrMax);
+		pidSetError(&altHoldPID, -altHoldErr);
 
-    // Get control from PID controller, dont update the error (done above)
-    // Smooth it and include barometer vspeed
-    // TODO same as smoothing the error??
-    altHoldPIDVal = (pidAlpha) * altHoldPIDVal + (1.f - pidAlpha) * ((vSpeedAcc * vSpeedAccFac) +
-                    (vSpeedASL * vSpeedASLFac) + pidUpdate(&altHoldPID, asl, false));
+		// Get control from PID controller, dont update the error (done above)
+		// Smooth it and include barometer vspeed
+		// TODO same as smoothing the error??
+		altHoldPIDVal = (pidAlpha) * altHoldPIDVal + (1.f - pidAlpha) * ((vSpeedAcc * vSpeedAccFac) +
+				(vSpeedASL * vSpeedASLFac) + pidUpdate(&altHoldPID, asl, false));
 
-    // compute new thrust
-    actuatorThrust =  max(altHoldMinThrust, min(altHoldMaxThrust,
-                          limitThrust( altHoldBaseThrust + (int32_t)(altHoldPIDVal*pidAslFac))));
+		// compute new thrust
+		actuatorThrust =  max(altHoldMinThrust, min(altHoldMaxThrust,
+				limitThrust( altHoldBaseThrust + (int32_t)(altHoldPIDVal*pidAslFac))));
 
-    // i part should compensate for voltage drop
+		// i part should compensate for voltage drop
 
-  }
-  else
-  {
-    altHoldTarget = 0.0;
-    altHoldErr = 0.0;
-    altHoldPIDVal = 0.0;
-  }
+	}
+	else
+	{
+		altHoldTarget = 0.0;
+		altHoldErr = 0.0;
+		altHoldPIDVal = 0.0;
+	}
 }
 /**
  * Rotate Yaw so that the Crazyflie will change what is considered front.
@@ -500,15 +714,15 @@ static void stabilizerAltHoldUpdate(void)
  */
 static void stabilizerRotateYaw(float yawRad)
 {
-  float cosy;
-  float siny;
-  float originalRoll = eulerRollDesired;
-  float originalPitch = eulerPitchDesired;
+	float cosy;
+	float siny;
+	float originalRoll = eulerRollDesired;
+	float originalPitch = eulerPitchDesired;
 
-  cosy = cosf(yawRad);
-  siny = sinf(yawRad);
-  eulerRollDesired = originalRoll * cosy - originalPitch * siny;
-  eulerPitchDesired = originalPitch * cosy + originalRoll * siny;
+	cosy = cosf(yawRad);
+	siny = sinf(yawRad);
+	eulerRollDesired = originalRoll * cosy - originalPitch * siny;
+	eulerPitchDesired = originalPitch * cosy + originalRoll * siny;
 }
 
 /**
@@ -518,21 +732,21 @@ static void stabilizerRotateYaw(float yawRad)
  */
 static void stabilizerRotateYawCarefree(bool reset)
 {
-  float yawRad;
-  float cosy;
-  float siny;
-  float originalRoll = eulerRollDesired;
+	float yawRad;
+	float cosy;
+	float siny;
+	float originalRoll = eulerRollDesired;
 
-  if (reset)
-  {
-    carefreeFrontAngle = eulerYawActual;
-  }
+	if (reset)
+	{
+		carefreeFrontAngle = eulerYawActual;
+	}
 
-  yawRad = (eulerYawActual - carefreeFrontAngle) * (float)M_PI / 180;
-  cosy = cosf(yawRad);
-  siny = sinf(yawRad);
-  eulerRollDesired = eulerRollDesired * cosy - eulerPitchDesired * siny;
-  eulerPitchDesired = eulerPitchDesired * cosy + originalRoll * siny;
+	yawRad = (eulerYawActual - carefreeFrontAngle) * (float)M_PI / 180;
+	cosy = cosf(yawRad);
+	siny = sinf(yawRad);
+	eulerRollDesired = eulerRollDesired * cosy - eulerPitchDesired * siny;
+	eulerPitchDesired = eulerPitchDesired * cosy + originalRoll * siny;
 }
 
 /**
@@ -541,98 +755,98 @@ static void stabilizerRotateYawCarefree(bool reset)
 #ifdef PLATFORM_CF1
 static void stabilizerYawModeUpdate(void)
 {
-  switch (commanderGetYawMode())
-  {
-    case CAREFREE:
-      stabilizerRotateYawCarefree(commanderGetYawModeCarefreeResetFront());
-      break;
-    case PLUSMODE:
-      // Default in plus mode. Do nothing
-      break;
-    case XMODE: // Fall though
-    default:
-      stabilizerRotateYaw(-45 * M_PI / 180);
-      break;
-  }
+	switch (commanderGetYawMode())
+	{
+	case CAREFREE:
+		stabilizerRotateYawCarefree(commanderGetYawModeCarefreeResetFront());
+		break;
+	case PLUSMODE:
+		// Default in plus mode. Do nothing
+		break;
+	case XMODE: // Fall though
+	default:
+		stabilizerRotateYaw(-45 * M_PI / 180);
+		break;
+	}
 }
 #else
 static void stabilizerYawModeUpdate(void)
 {
-  switch (commanderGetYawMode())
-  {
-    case CAREFREE:
-      stabilizerRotateYawCarefree(commanderGetYawModeCarefreeResetFront());
-      break;
-    case PLUSMODE:
-      stabilizerRotateYaw(45 * M_PI / 180);
-      break;
-    case XMODE: // Fall though
-    default:
-      // Default in x-mode. Do nothing
-      break;
-  }
+	switch (commanderGetYawMode())
+	{
+	case CAREFREE:
+		stabilizerRotateYawCarefree(commanderGetYawModeCarefreeResetFront());
+		break;
+	case PLUSMODE:
+		stabilizerRotateYaw(45 * M_PI / 180);
+		break;
+	case XMODE: // Fall though
+	default:
+		// Default in x-mode. Do nothing
+		break;
+	}
 }
 #endif
 
 static void distributePower(const uint16_t thrust, const int16_t roll,
-                            const int16_t pitch, const int16_t yaw)
+		const int16_t pitch, const int16_t yaw)
 {
 #ifdef QUAD_FORMATION_X
-  int16_t r = roll >> 1;
-  int16_t p = pitch >> 1;
-  motorPowerM1 = limitThrust(thrust - r + p + yaw);
-  motorPowerM2 = limitThrust(thrust - r - p - yaw);
-  motorPowerM3 =  limitThrust(thrust + r - p + yaw);
-  motorPowerM4 =  limitThrust(thrust + r + p - yaw);
+	int16_t r = roll >> 1;
+	int16_t p = pitch >> 1;
+	motorPowerM1 = limitThrust(thrust - r + p + yaw);
+	motorPowerM2 = limitThrust(thrust - r - p - yaw);
+	motorPowerM3 =  limitThrust(thrust + r - p + yaw);
+	motorPowerM4 =  limitThrust(thrust + r + p - yaw);
 #else // QUAD_FORMATION_NORMAL
-  motorPowerM1 = limitThrust(thrust + pitch + yaw);
-  motorPowerM2 = limitThrust(thrust - roll - yaw);
-  motorPowerM3 =  limitThrust(thrust - pitch + yaw);
-  motorPowerM4 =  limitThrust(thrust + roll - yaw);
+	motorPowerM1 = limitThrust(thrust + pitch + yaw);
+	motorPowerM2 = limitThrust(thrust - roll - yaw);
+	motorPowerM3 =  limitThrust(thrust - pitch + yaw);
+	motorPowerM4 =  limitThrust(thrust + roll - yaw);
 #endif
 
-  motorsSetRatio(MOTOR_M1, motorPowerM1);
-  motorsSetRatio(MOTOR_M2, motorPowerM2);
-  motorsSetRatio(MOTOR_M3, motorPowerM3);
-  motorsSetRatio(MOTOR_M4, motorPowerM4);
+	motorsSetRatio(MOTOR_M1, motorPowerM1);
+	motorsSetRatio(MOTOR_M2, motorPowerM2);
+	motorsSetRatio(MOTOR_M3, motorPowerM3);
+	motorsSetRatio(MOTOR_M4, motorPowerM4);
 }
 
 static uint16_t limitThrust(int32_t value)
 {
-  if(value > UINT16_MAX)
-  {
-    value = UINT16_MAX;
-  }
-  else if(value < 0)
-  {
-    value = 0;
-  }
+	if(value > UINT16_MAX)
+	{
+		value = UINT16_MAX;
+	}
+	else if(value < 0)
+	{
+		value = 0;
+	}
 
-  return (uint16_t)value;
+	return (uint16_t)value;
 }
 
 // Constrain value between min and max
 static float constrain(float value, const float minVal, const float maxVal)
 {
-  return min(maxVal, max(minVal,value));
+	return min(maxVal, max(minVal,value));
 }
 
 // Deadzone
 static float deadband(float value, const float threshold)
 {
-  if (fabs(value) < threshold)
-  {
-    value = 0;
-  }
-  else if (value > 0)
-  {
-    value -= threshold;
-  }
-  else if (value < 0)
-  {
-    value += threshold;
-  }
-  return value;
+	if (fabs(value) < threshold)
+	{
+		value = 0;
+	}
+	else if (value > 0)
+	{
+		value -= threshold;
+	}
+	else if (value < 0)
+	{
+		value += threshold;
+	}
+	return value;
 }
 
 LOG_GROUP_START(stabilizer)
@@ -692,6 +906,13 @@ LOG_ADD(LOG_FLOAT, zSpeed, &vSpeed)
 LOG_ADD(LOG_FLOAT, vSpeed, &vSpeed)
 LOG_ADD(LOG_FLOAT, vSpeedASL, &vSpeedASL)
 LOG_ADD(LOG_FLOAT, vSpeedAcc, &vSpeedAcc)
+LOG_ADD(LOG_FLOAT, vSpeedProximity, &vSpeedProximity)
+LOG_ADD(LOG_FLOAT, yPosASL, &yPosASL)
+LOG_ADD(LOG_FLOAT, yPosAcc, &yPosAcc)
+LOG_ADD(LOG_FLOAT, yPosProximity, &yPosProximity)
+LOG_ADD(LOG_FLOAT, proximity, &proximity)
+LOG_ADD(LOG_FLOAT, baroHeight, &baroHeight)
+LOG_ADD(LOG_FLOAT, proximityLong, &proximityLong)
 LOG_GROUP_STOP(altHold)
 
 #if defined(SITAW_ENABLED)
